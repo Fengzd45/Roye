@@ -1,0 +1,47 @@
+name: 飞书定时同步
+
+on:
+  schedule:
+    - cron: '0 18 * * *'  # 每天北京时间凌晨2点同步一次
+  workflow_dispatch:        # 支持手动触发
+  repository_dispatch:      # 支持通过飞书发送的 HTTP 触发
+    types: [feishu-new-record]
+
+# 显式声明该工作流拥有“写入”权限
+permissions:
+  contents: write
+
+jobs:
+  sync-data:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取当前仓库代码
+        uses: actions/checkout@v3
+      
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: 安装依赖
+        run: pip install requests
+      
+      - name: 执行同步脚本
+        run: python sync_feishu.py
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_APP_TOKEN: ${{ secrets.FEISHU_APP_TOKEN }}
+          FEISHU_TABLE_ID: ${{ secrets.FEISHU_TABLE_ID }}
+      
+      - name: 将下载好的新资料和清单提交回仓库
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add -A
+          
+          # 没有变更则跳过提交
+          git diff --quiet && git diff --staged --quiet || git commit -m "飞书自动同步 [skip ci]"
+          
+          # 推送更新
+          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git HEAD:${{ github.ref_name }}
