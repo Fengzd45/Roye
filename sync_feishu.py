@@ -19,9 +19,14 @@ if not all([APP_ID, APP_SECRET, APP_TOKEN, TABLE_ID]):
 DATA_DIR = Path("资料文件夹")
 DATA_DIR.mkdir(exist_ok=True)
 MANIFEST_PATH = Path("manifest.json")
+DATA_JSON_PATH = Path("data.json")
 LAST_RUN_FILE = Path("last_run_time.txt")
 
 FULL_SYNC = "--full-sync" in sys.argv
+
+# 安全文件名清洗（杜绝特殊字符干扰路径）
+def clean_filename(name):
+    return re.sub(r'[\\/:*?"<>|]', "", str(name)).strip()
 
 # ================== 飞书 API ==================
 def get_tenant_access_token():
@@ -53,8 +58,6 @@ def get_all_records(token):
         resp.raise_for_status()
         
         data = resp.json()
-        print(f"🔍 飞书原始返回（第 {page_num} 页）: {json.dumps(data, ensure_ascii=False)}")
-
         if data.get("code") != 0:
             print(f"❌ 飞书 API 报错，错误码: {data.get('code')}，信息: {data}")
             break
@@ -93,7 +96,7 @@ def download_file(url, save_path, token):
         return False
 
 def sync_from_feishu():
-    print("🔄 开始同步飞书数据...")
+    print("🔄 开始同步飞书询价数据...")
     if FULL_SYNC:
         print("▶️ 检测到 --full-sync 参数，强制全量同步并覆盖")
     else:
@@ -107,100 +110,101 @@ def sync_from_feishu():
     
     if not records:
         print("⚠️ 没有获取到任何记录。")
-        print("💡 排查提示：如果飞书返回的是空列表 []，请务必去飞书表格 -> 右上角 ... -> 权限管理 -> 添加本应用的 APP_ID 作为协作者！")
         return
     print(f"📦 总获取到 {len(records)} 条记录")
 
     synced_count = 0
+    
+    # 临时收集用于生成 data.json 的结构化数据
+    data_json_list = []
+
     for record in records:
         fields = record.get("fields", {})
-        name = fields.get("姓名")
-        if not name:
-            print(f"⚠️ 跳过未命名的记录 (无姓名) - ID: {record.get('record_id')}")
+        
+        # 精准匹配飞书字段（兼容空格和下划线）
+        company = fields.get("Quoting Company") or fields.get("Quoting_Company")
+        contact = fields.get("Contact Information") or fields.get("Contact_Information")
+        item_name_price = fields.get("Item Name & Unit Price") or fields.get("Item_Name_&_Unit_Price")
+        valid_date = fields.get("Quotation Validity Date") or fields.get("Quotation_Validity_Date")
+        image_field = fields.get("Product Image") or fields.get("Product_Image")
+
+        if not company or not item_name_price:
+            print(f"⚠️ 跳过不完整记录 - ID: {record.get('record_id')}")
             continue
 
-        person_dir = DATA_DIR / name
-        person_dir.mkdir(exist_ok=True)
-        has_new_file = False
-        
-        # ====== 文本字段处理：首行作为标题/文件名 ======
-        text_content = None
-        possible_keys = ["文本", "文字资料", "文本资料"]
-        for key in possible_keys:
-            if fields.get(key) and isinstance(fields.get(key), str):
-                text_content = fields.get(key)
-                break
-        
-        if text_content:
-            # 提取首行作为标题/文件名
-            lines = text_content.split('\n')
-            first_line = lines[0].strip() if lines else "无标题"
-            
-            # 清理文件名中的非法字符（Windows/Unix 不兼容字符）
-            safe_filename = re.sub(r'[<>:"/\\|?*]', '_', first_line)
-            safe_filename = safe_filename.strip() or "无标题"
-            
-            # 限制文件名长度，避免过长
-            if len(safe_filename) > 100:
-                safe_filename = safe_filename[:100]
-            
-            txt_filename = f"{safe_filename}.txt"
-            save_path = person_dir / txt_filename
-            
-            # 检查文件是否已存在（按新文件名检查）
-            if not save_path.exists() or FULL_SYNC:
-                print(f"📄 保存文本资料: {name}/{txt_filename}")
-                
-                # 正文 = 除首行外的内容
-                body = '\n'.join(lines[1:]).strip()
-                formatted_text = f"========== {first_line} ==========\n\n{body}"
-                
-                with open(save_path, "w", encoding="utf-8") as f:
-                    f.write(formatted_text)
-                
-                has_new_file = True
-            else:
-                print(f"   ⏭️ 文件已存在，跳过: {name}/{txt_filename}")
-        else:
-            print(f"   ℹ️ {name} 无文本内容")
+        safe_company = clean_filename(company)
+        safe_contact = clean_filename(contact) if contact else "未留联系方式"
+        safe_item_name_price = clean_filename(item_name_price)
+        safe_valid_date = clean_filename(valid_date) if valid_date else "长期有效"
 
-        # 处理【图片音视频】附件
-        media_field = fields.get("图片音视频")
-        if media_field and isinstance(media_field, list):
-            for media in media_field:
-                filename = media.get("name", "media.jpg").replace('\n', '').replace('\r', '').replace('\t', '').strip()
-                download_url = media.get("url")
-                if not download_url:
-                    print(f"   ⚠️ 媒体文件无 URL: {filename}")
-                    continue
-                save_path = person_dir / filename
+        # 方案 B：创建 [供货商_联系方式] 一级子文件夹
+        supplier_dir = DATA_DIR / f"{safe_company}_{safe_contact}"
+        supplier_dir.mkdir(exist_ok=True)
+        
+        image_local_path = ""
+        has_new_file = False
+
+        # 处理产品图片下载
+        if image_field and isinstance(image_field, list) and len(image_field) > 0:
+            media = image_field[0]
+            orig_name = media.get("name", "image.jpg")
+            ext = os.path.splitext(orig_name)[1] or ".jpg"
+            
+            # 商品图片命名规则：商品名称与单价_有效期.jpg
+            filename = f"{safe_item_name_price}_{safe_valid_date}{ext}"
+            download_url = media.get("url")
+            
+            if download_url:
+                save_path = supplier_dir / filename
+                # 如果文件已存在且非全量同步，则跳过
                 if save_path.exists() and not FULL_SYNC:
-                    continue
-                if download_file(download_url, save_path, token):
-                    print(f"✅ 图片/视频: {name}/{filename}")
-                    has_new_file = True
+                    image_local_path = str(save_path)
                 else:
-                    print(f"❌ 媒体下载失败: {name}/{filename}")
+                    if download_file(download_url, save_path, token):
+                        print(f"✅ 下载成功: {supplier_dir.name}/{filename}")
+                        image_local_path = str(save_path)
+                        has_new_file = True
+                    else:
+                        print(f"❌ 下载失败: {supplier_dir.name}/{filename}")
 
         if has_new_file:
             synced_count += 1
 
-    # 生成 manifest.json
+        # 写入 JSON 数据库，解析单价与品名
+        name_parts = safe_item_name_price.split('_')
+        display_name = name_parts[0]
+        display_price = name_parts[1] if len(name_parts) > 1 else "电询/未提供"
+
+        data_json_list.append({
+            "company": company,
+            "contact": contact or "无",
+            "item_name": display_name,
+            "price": display_price,
+            "valid_date": valid_date or "长期有效",
+            "image_path": image_local_path.replace("\\", "/") if image_local_path else ""
+        })
+
+    # 生成传统的 manifest.json (与图库文件结构一致)
     print("📋 正在生成 manifest.json ...")
     manifest = {}
-    for person_dir in DATA_DIR.iterdir():
-        if person_dir.is_dir():
-            files = [f.name for f in person_dir.iterdir() if f.is_file()]
+    for sub_dir in DATA_DIR.iterdir():
+        if sub_dir.is_dir():
+            files = [f.name for f in sub_dir.iterdir() if f.is_file()]
             if files:
-                manifest[person_dir.name] = files
+                manifest[sub_dir.name] = files
+                
     with open(MANIFEST_PATH, "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
+
+    # 生成前端卡片专用 data.json
+    print("💾 正在生成 data.json ...")
+    with open(DATA_JSON_PATH, "w", encoding="utf-8") as f:
+        json.dump(data_json_list, f, ensure_ascii=False, indent=2)
     
     import time
     LAST_RUN_FILE.write_text(time.strftime("%Y-%m-%d %H:%M:%S"))
     
-    print(f"✅ manifest.json 已生成，共 {len(manifest)} 人")
-    print(f"🎉 同步完成：{synced_count} 人新增或更新了资料")
+    print(f"🎉 同步完成：{synced_count} 个供货商新增或更新了商品")
 
 if __name__ == "__main__":
     sync_from_feishu()
