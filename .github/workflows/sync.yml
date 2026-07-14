@@ -2,7 +2,7 @@ name: 飞书定时与事件同步
 
 on:
   schedule:
-    - cron: '0 18 * * *'       # 1. 定时：每天北京时间凌晨2点同步一次
+    - cron: '0 18 * * *'       # 1. 定时：每天北京时间凌晨2点同步一次[cite: 1, 4]
   workflow_dispatch:            # 2. 手工：支持在 GitHub Actions 页面点击按钮手动调试[cite: 1, 4]
   repository_dispatch:          # 3. 飞书添加记录：跨平台实时响应触发
     types: [feishu_record_added]
@@ -27,7 +27,7 @@ jobs:
         run: pip install requests[cite: 1, 4]
       
       - name: 执行同步脚本
-        run: python feishu_sync.py  # 运行您的飞书询价同步代码
+        run: python sync_feishu.py  # 👈 已成功修改为 sync_feishu.py[cite: 1]
         env:
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}[cite: 1, 4]
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}[cite: 1, 4]
