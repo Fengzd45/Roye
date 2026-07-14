@@ -1,206 +1,247 @@
-# -*- coding: utf-8 -*-
-import os
-import sys
-import json
-import re
-import requests
-from pathlib import Path
-
-# ================== 从环境变量读取配置 ==================
-APP_ID = os.environ.get("FEISHU_APP_ID")
-APP_SECRET = os.environ.get("FEISHU_APP_SECRET")
-APP_TOKEN = os.environ.get("FEISHU_APP_TOKEN")
-TABLE_ID = os.environ.get("FEISHU_TABLE_ID")
-
-if not all([APP_ID, APP_SECRET, APP_TOKEN, TABLE_ID]):
-    raise Exception("缺少必要的环境变量，请检查 GitHub Secrets 配置")
-
-# ================== 路径与状态设置 ==================
-DATA_DIR = Path("资料文件夹")
-DATA_DIR.mkdir(exist_ok=True)
-MANIFEST_PATH = Path("manifest.json")
-LAST_RUN_FILE = Path("last_run_time.txt")
-
-FULL_SYNC = "--full-sync" in sys.argv
-
-# ================== 飞书 API ==================
-def get_tenant_access_token():
-    url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
-    payload = {"app_id": APP_ID, "app_secret": APP_SECRET}
-    resp = requests.post(url, json=payload, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
-    if data.get("code") != 0:
-        raise Exception(f"获取 token 失败: {data}")
-    return data["tenant_access_token"]
-
-def get_all_records(token):
-    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{APP_TOKEN}/tables/{TABLE_ID}/records"
-    headers = {"Authorization": f"Bearer {token}"}
-    all_records = []
-    page_token = None
-    page_num = 1
-
-    print(f"🌐 请求飞书 API URL: {url}")
-    
-    while True:
-        params = {"page_size": 100}
-        if page_token:
-            params["page_token"] = page_token
-            
-        print(f"📄 正在获取第 {page_num} 页数据...")
-        resp = requests.get(url, headers=headers, params=params, timeout=15)
-        resp.raise_for_status()
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <title> RoyesGarden 询价展示系统</title>
+    <style>
+        /* ================= 基础样式与复古暖色调调色盘（传承自成电624图库） ================= */
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background: #f5f0e8; padding: 16px; color: #4a2a0a; }
+        .container { max-width: 1200px; margin: 0 auto; background: white; border-radius: 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); overflow: hidden; }
+        .header { background: #8b5a2b; color: white; padding: 20px; text-align: center; }
+        .header h1 { margin: 0; font-size: 1.6rem; }
+        .header p { margin: 8px 0 0; opacity: 0.9; font-size: 0.85rem; }
+        .content { padding: 20px; }
         
-        data = resp.json()
-        print(f"🔍 飞书原始返回（第 {page_num} 页）: {json.dumps(data, ensure_ascii=False)}")
-
-        if data.get("code") != 0:
-            print(f"❌ 飞书 API 报错，错误码: {data.get('code')}，信息: {data}")
-            break
-
-        records = data.get("data", {}).get("items")
-        if records is None:
-            print("⚠️ API 返回中未找到 'items' 字段，请检查 APP_TOKEN 或 TABLE_ID 是否正确！")
-            break
-
-        print(f"📊 本页获取到 {len(records)} 条记录")
-        all_records.extend(records)
-
-        page_token = data.get("data", {}).get("page_token")
-        if not page_token:
-            print("✅ 所有分页读取完毕")
-            break
-        page_num += 1
-
-    return all_records
-
-def download_file(url, save_path, token):
-    headers = {"Authorization": f"Bearer {token}"}
-    try:
-        resp = requests.get(url, headers=headers, stream=True, timeout=30)
-        if resp.status_code == 200:
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            with open(save_path, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            return True
-        else:
-            print(f"   下载失败: HTTP {resp.status_code}")
-            return False
-    except Exception as e:
-        print(f"   下载异常: {e}")
-        return False
-
-def sync_from_feishu():
-    print("🔄 开始同步飞书数据...")
-    if FULL_SYNC:
-        print("▶️ 检测到 --full-sync 参数，强制全量同步并覆盖")
-    else:
-        if LAST_RUN_FILE.exists():
-            print(f"⏱️ 增量模式，上次同步时间为: {LAST_RUN_FILE.read_text().strip()}")
-        else:
-            print("⏱️ 首次运行，触发全量同步")
-    
-    token = get_tenant_access_token()
-    records = get_all_records(token)
-    
-    if not records:
-        print("⚠️ 没有获取到任何记录。")
-        print("💡 排查提示：如果飞书返回的是空列表 []，请务必去飞书表格 -> 右上角 ... -> 权限管理 -> 添加本应用的 APP_ID 作为协作者！")
-        return
-    print(f"📦 总获取到 {len(records)} 条记录")
-
-    synced_count = 0
-    for record in records:
-        fields = record.get("fields", {})
-        name = fields.get("姓名")
-        if not name:
-            print(f"⚠️ 跳过未命名的记录 (无姓名) - ID: {record.get('record_id')}")
-            continue
-
-        person_dir = DATA_DIR / name
-        person_dir.mkdir(exist_ok=True)
-        has_new_file = False
+        /* 状态控制栏（重构，支持强大筛选排序） */
+        .status-bar { background: #f0e8d8; padding: 14px 20px; border-radius: 16px; margin-bottom: 20px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid #e0d6c0; }
+        .search-input { flex: 1; min-width: 200px; padding: 8px 12px; border: 1px solid #cbd5e0; border-radius: 8px; font-size: 0.9rem; }
+        .filter-select { padding: 8px 12px; border: 1px solid #cbd5e0; border-radius: 8px; background-color: white; font-size: 0.9rem; color: #4a2a0a; }
+        .status-info { font-size: 0.9rem; font-weight: bold; color: #2c5a2c; display: flex; align-items: center; gap: 6px; width: 100%; border-bottom: 1px solid #e0d6c0; padding-bottom: 10px; margin-bottom: 5px;}
         
-        # ====== 文本字段处理：首行作为标题/文件名 ======
-        text_content = None
-        possible_keys = ["文本", "文字资料", "文本资料"]
-        for key in possible_keys:
-            if fields.get(key) and isinstance(fields.get(key), str):
-                text_content = fields.get(key)
-                break
+        /* 商品卡片网格系统 */
+        .product-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 20px; margin-top: 10px; }
+        .card { background: #faf8f0; border-radius: 18px; border: 1px solid #e0d6c0; overflow: hidden; display: flex; flex-direction: column; transition: transform 0.15s; position: relative; }
+        .card:hover { transform: translateY(-3px); box-shadow: 0 6px 15px rgba(139,90,43,0.15); }
         
-        if text_content:
-            # 提取首行作为标题/文件名
-            lines = text_content.split('\n')
-            first_line = lines[0].strip() if lines else "无标题"
-            
-            # 清理文件名中的非法字符（Windows/Unix 不兼容字符）
-            safe_filename = re.sub(r'[<>:"/\\|?*]', '_', first_line)
-            safe_filename = safe_filename.strip() or "无标题"
-            
-            # 限制文件名长度，避免过长
-            if len(safe_filename) > 100:
-                safe_filename = safe_filename[:100]
-            
-            txt_filename = f"{safe_filename}.txt"
-            save_path = person_dir / txt_filename
-            
-            # 检查文件是否已存在（按新文件名检查）
-            if not save_path.exists() or FULL_SYNC:
-                print(f"📄 保存文本资料: {name}/{txt_filename}")
-                
-                # 正文 = 除首行外的内容
-                body = '\n'.join(lines[1:]).strip()
-                formatted_text = f"========== {first_line} ==========\n\n{body}"
-                
-                with open(save_path, "w", encoding="utf-8") as f:
-                    f.write(formatted_text)
-                
-                has_new_file = True
-            else:
-                print(f"   ⏭️ 文件已存在，跳过: {name}/{txt_filename}")
-        else:
-            print(f"   ℹ️ {name} 无文本内容")
+        /* 图片展示区域 */
+        .image-container { width: 100%; height: 200px; background-color: #f0e8d8; overflow: hidden; position: relative; border-bottom: 1px solid #e0d6c0; }
+        .product-image { width: 100%; height: 100%; object-fit: cover; cursor: pointer; }
+        .expired-badge { position: absolute; top: 10px; right: 10px; background-color: rgba(139, 90, 43, 0.9); color: white; padding: 4px 10px; border-radius: 8px; font-size: 11px; font-weight: bold; z-index: 10; }
+        
+        /* 卡片内容区域 */
+        .card-body { padding: 16px; display: flex; flex-direction: column; flex-grow: 1; }
+        .product-title { font-size: 1.1rem; font-weight: bold; color: #4a2a0a; margin-bottom: 8px; }
+        .price-tag { font-size: 1.3rem; color: #b83232; font-weight: bold; margin-bottom: 12px; }
+        .info-row { font-size: 0.85rem; color: #7a6e5d; margin-bottom: 6px; display: flex; justify-content: space-between; }
+        .contact-btn { display: inline-block; background-color: #8b5a2b; color: white; text-align: center; padding: 10px; border-radius: 8px; text-decoration: none; margin-top: auto; font-size: 0.9rem; font-weight: bold; transition: background-color 0.15s; }
+        .contact-btn:hover { background-color: #6b421e; }
+        
+        /* 过期样式变灰效果 */
+        .expired { opacity: 0.65; }
+        .expired .contact-btn { background-color: #a09584; }
+        
+        .empty-state { text-align: center; color: #a69e8a; padding: 40px 20px; font-size: 1rem; grid-column: 1 / -1; }
+        .footer { text-align: center; padding: 16px; font-size: 0.75rem; color: #a09885; border-top: 1px solid #e8e2d4; }
+        
+        @media (max-width: 600px) {
+            body { padding: 10px; }
+            .status-bar { padding: 10px; gap: 8px; }
+            .product-grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
 
-        # 处理【图片音视频】附件
-        media_field = fields.get("图片音视频")
-        if media_field and isinstance(media_field, list):
-            for media in media_field:
-                filename = media.get("name", "media.jpg").replace('\n', '').replace('\r', '').replace('\t', '').strip()
-                download_url = media.get("url")
-                if not download_url:
-                    print(f"   ⚠️ 媒体文件无 URL: {filename}")
-                    continue
-                save_path = person_dir / filename
-                if save_path.exists() and not FULL_SYNC:
-                    continue
-                if download_file(download_url, save_path, token):
-                    print(f"✅ 图片/视频: {name}/{filename}")
-                    has_new_file = True
-                else:
-                    print(f"❌ 媒体下载失败: {name}/{filename}")
-
-        if has_new_file:
-            synced_count += 1
-
-    # 生成 manifest.json
-    print("📋 正在生成 manifest.json ...")
-    manifest = {}
-    for person_dir in DATA_DIR.iterdir():
-        if person_dir.is_dir():
-            files = [f.name for f in person_dir.iterdir() if f.is_file()]
-            if files:
-                manifest[person_dir.name] = files
-    with open(MANIFEST_PATH, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, ensure_ascii=False, indent=2)
+<div class="container">
+    <div class="header">
+        <h1>RoyesGarden 询价展示系统</h1>
+        <p>汇集各供货单位最新商品及报价信息 | 静态托管服务模式</p>
+    </div>
     
-    import time
-    LAST_RUN_FILE.write_text(time.strftime("%Y-%m-%d %H:%M:%S"))
-    
-    print(f"✅ manifest.json 已生成，共 {len(manifest)} 人")
-    print(f"🎉 同步完成：{synced_count} 人新增或更新了资料")
+    <div class="content">
+        <div class="status-bar">
+            <div class="status-info" id="statusLabel">🌐 正在拉取商品数据库...</div>
+            
+            <input type="text" id="searchInput" class="search-input" placeholder="输入商品名称或供货商进行检索...">
+            
+            <select id="sortSelect" class="filter-select">
+                <option value="default">默认排序</option>
+                <option value="priceAsc">价格：低到高</option>
+                <option value="priceDesc">价格：高到低</option>
+            </select>
 
-if __name__ == "__main__":
-    sync_from_feishu()
+            <select id="supplierSelect" class="filter-select">
+                <option value="all">所有供货商</option>
+            </select>
+
+            <label style="font-size: 0.85rem; color: #4a2a0a; display: flex; align-items: center; gap: 4px;">
+                <input type="checkbox" id="hideExpired"> 隐藏过期报价
+            </label>
+        </div>
+
+        <div id="productGrid" class="product-grid">
+            <div class="empty-state">正在等待加载数据源...</div>
+        </div>
+    </div>
+    
+    <div class="footer">查询系统 | 询价数据展示中心</div>
+</div>
+
+<script>
+// ================= 全局核心数据源 =================
+let productsData = [];
+
+/**
+ * 【传承自图库核心】：动态自适应绝对路径解析函数
+ * 完美解决 GitHub Pages 中文乱码和空格解析 404 问题
+ */
+function getFileUrl(imagePath) {
+    if (!imagePath) return '';
+    var currentUrl = window.location.href;
+    var basePath = currentUrl.substring(0, currentUrl.lastIndexOf('/'));
+    
+    // 拆分出“资料文件夹/供货商文件夹/文件名”
+    var parts = imagePath.split('/');
+    var encodedParts = parts.map(function(part) {
+        return encodeURIComponent(part);
+    });
+    
+    // 如果返回的开头有 "." 或空字符，则直接拼接
+    if (encodedParts[0] === '.' || encodedParts[0] === '') {
+        encodedParts.shift();
+    }
+    return basePath + '/' + encodedParts.join('/');
+}
+
+// 获取核心 DOM 句柄
+const statusLabel = document.getElementById('statusLabel');
+const productGrid = document.getElementById('productGrid');
+
+// 价格解析工具
+function parsePrice(priceStr) {
+    var num = parseFloat(priceStr.replace(/[^0-9.]/g, ''));
+    return isNaN(num) ? 0 : num;
+}
+
+// 检查是否过期
+function isExpired(dateStr) {
+    if (!dateStr || dateStr === "长期有效") return false;
+    var today = new Date();
+    today.setHours(0,0,0,0);
+    var validDate = new Date(dateStr);
+    return validDate < today;
+}
+
+// 渲染前端 UI
+function renderUI(data) {
+    if (data.length === 0) {
+        productGrid.innerHTML = '<div class="empty-state">📭 未检索到符合条件的商品报价。</div>';
+        return;
+    }
+
+    var html = '';
+    data.forEach(function(item) {
+        var expired = isExpired(item.valid_date);
+        var imageUrl = item.image_path ? getFileUrl(item.image_path) : '';
+        var cardClass = expired ? 'card expired' : 'card';
+
+        html += `
+        <div class="${cardClass}">
+            <div class="image-container">
+                ${expired ? '<div class="expired-badge">已过期</div>' : ''}
+                <img class="product-image" src="${imageUrl}" alt="${escapeHtml(item.item_name)}" onerror="this.src='https://placehold.co/300x200?text=暂无商品图片'">
+            </div>
+            <div class="card-body">
+                <div class="product-title">${escapeHtml(item.item_name)}</div>
+                <div class="price-tag">${escapeHtml(item.price)}</div>
+                <div class="info-row">
+                    <span>供货商:</span>
+                    <span style="font-weight:bold; color:#8b5a2b;">${escapeHtml(item.company)}</span>
+                </div>
+                <div class="info-row">
+                    <span>有效期至:</span>
+                    <span style="${expired ? 'color:#b83232; font-weight:bold;' : ''}">${escapeHtml(item.valid_date)}</span>
+                </div>
+                <a href="tel:${escapeHtml(item.contact)}" class="contact-btn">拨号联系 (${escapeHtml(item.contact)})</a>
+            </div>
+        </div>`;
+    });
+    productGrid.innerHTML = html;
+}
+
+// 供货商下拉菜单填充
+function initSupplierFilter(data) {
+    var select = document.getElementById('supplierSelect');
+    var suppliers = {};
+    data.forEach(function(item) {
+        suppliers[item.company] = true;
+    });
+    Object.keys(suppliers).forEach(function(company) {
+        var option = document.createElement('option');
+        option.value = company;
+        option.textContent = company;
+        select.appendChild(option);
+    });
+}
+
+// 混合检索与过滤逻辑
+function filterAndSort() {
+    var keyword = document.getElementById('searchInput').value.toLowerCase();
+    var sortVal = document.getElementById('sortSelect').value;
+    var supplierVal = document.getElementById('supplierSelect').value;
+    var hideExpired = document.getElementById('hideExpired').checked;
+
+    var filtered = productsData.filter(function(item) {
+        var matchKeyword = item.item_name.toLowerCase().indexOf(keyword) !== -1 || 
+                           item.company.toLowerCase().indexOf(keyword) !== -1;
+        var matchSupplier = (supplierVal === 'all') || (item.company === supplierVal);
+        var matchExpired = !hideExpired || !isExpired(item.valid_date);
+
+        return matchKeyword && matchSupplier && matchExpired;
+    });
+
+    if (sortVal === 'priceAsc') {
+        filtered.sort(function(a, b) { return parsePrice(a.price) - parsePrice(b.price); });
+    } else if (sortVal === 'priceDesc') {
+        filtered.sort(function(a, b) { return parsePrice(b.price) - parsePrice(a.price); });
+    }
+
+    renderUI(filtered);
+}
+
+function escapeHtml(str) {
+    if (!str) return '';
+    return str.replace(/[&<>"]/g, function(m) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m] || m;
+    });
+}
+
+// 绑定操作事件
+document.getElementById('searchInput').addEventListener('input', filterAndSort);
+document.getElementById('sortSelect').addEventListener('change', filterAndSort);
+document.getElementById('supplierSelect').addEventListener('change', filterAndSort);
+document.getElementById('hideExpired').addEventListener('change', filterAndSort);
+
+// 页面初始化加载
+window.onload = async function() {
+    try {
+        var response = await fetch('data.json?v=' + Date.now());
+        if (response.ok) {
+            productsData = await response.json();
+            statusLabel.innerHTML = `✅ 数据同步成功！已载入 ${productsData.length} 个商品的最新报价。`;
+            initSupplierFilter(productsData);
+            renderUI(productsData);
+        } else {
+            throw new Error('HTTP ' + response.status);
+        }
+    } catch (e) {
+        statusLabel.innerHTML = '❌ 未找到有效数据，请检查 data.json 是否同步。';
+        statusLabel.style.color = '#c00';
+        productGrid.innerHTML = `<div class="empty-state">⚠️ 加载失败: ${e.message}<br>请确保在 GitHub 仓库中已经成功运行 feishu_sync.py。</div>`;
+    }
+};
+</script>
+</body>
+</html>
