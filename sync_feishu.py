@@ -90,6 +90,19 @@ def download_file(url, save_path, token):
         print(f"   下载异常: {e}")
         return False
 
+# ✨ 核心：智能模糊提取器
+def extract_field_smartly(fields_dict, keywords):
+    """
+    在飞书返回的字段字典中，只要键名(Key)包含 keywords 列表中的任何一个词（忽略大小写和空格），
+    就将其值返回，实现对字段名变动的完美自适应！
+    """
+    for key, value in fields_dict.items():
+        key_lower = str(key).lower().replace(" ", "")
+        for kw in keywords:
+            if kw.lower().replace(" ", "") in key_lower:
+                return value
+    return None
+
 def sync_from_feishu():
     print("🔄 开始同步飞书询价数据...")
     
@@ -100,29 +113,40 @@ def sync_from_feishu():
         print("⚠️ 没有获取到任何记录。")
         return
 
+    # 🔬【关键调试诊断】：打印一条记录的所有实际字段名，供排查
+    for record in records:
+        fields = record.get("fields", {})
+        if fields:
+            print("🔬 [诊断信息] 飞书返回的实际字段名列表如下：")
+            for k, v in fields.items():
+                print(f"   - 字段名: '{k}', 对应值类型: {type(v).__name__}")
+            break # 只打印一条即可
+
     synced_count = 0
     data_json_list = []
 
     for record in records:
         fields = record.get("fields", {})
+        if not fields:
+            continue
         
-        # ✨【智能修复】：同时匹配带数字前缀与不带前缀的列名
-        company = fields.get("1. Quoting Company") or fields.get("Quoting Company") or fields.get("Quoting_Company")
-        contact = fields.get("2. Contact Information") or fields.get("Contact Information") or fields.get("Contact_Information")
-        item_name_price = fields.get("3. Item Name & Unit Price") or fields.get("Item Name & Unit Price") or fields.get("Item_Name_&_Unit_Price")
-        valid_date = fields.get("5. Quotation Validity Date") or fields.get("Quotation Validity Date") or fields.get("Quotation_Validity_Date")
-        image_field = fields.get("4. Product Image") or fields.get("Product Image") or fields.get("Product_Image")
+        # 🌟 超强自适应匹配，模糊识别列名
+        company = extract_field_smartly(fields, ["company", "公司", "供货商", "单位"])
+        contact = extract_field_smartly(fields, ["contact", "phone", "tel", "联系方式", "电话"])
+        item_name_price = extract_field_smartly(fields, ["item", "price", "商品", "单价", "报价", "名称"])
+        valid_date = extract_field_smartly(fields, ["valid", "date", "期", "时间", "天"])
+        image_field = extract_field_smartly(fields, ["image", "product", "photo", "pic", "图", "照"])
 
-        # 只要前两条空数据没有公司或商品，就会被安全跳过
+        # 校验关键字段
         if not company or not item_name_price:
-            print(f"⚠️ 跳过不完整记录 - ID: {record.get('record_id')}")
+            print(f"⚠️ 跳过不完整记录 - ID: {record.get('record_id')} (由于未能匹配到公司名或商品信息)")
             continue
 
         safe_company = clean_filename(company)
         safe_contact = clean_filename(contact) if contact else "未留联系方式"
         safe_item_name_price = clean_filename(item_name_price)
         
-        # 处理可能包含多种格式的有效期（如含有时间戳等）
+        # 处理可能包含多种格式的有效期（如时间戳）
         if isinstance(valid_date, int):
             import time
             safe_valid_date = time.strftime("%Y-%m-%d", time.localtime(valid_date/1000))
@@ -134,6 +158,7 @@ def sync_from_feishu():
         
         image_local_path = ""
         has_new_file = False
+        filename = ""
 
         if image_field and isinstance(image_field, list) and len(image_field) > 0:
             media = image_field[0]
@@ -153,16 +178,16 @@ def sync_from_feishu():
                         image_local_path = str(save_path)
                         has_new_file = True
 
-        if has_new_file or not (supplier_dir / filename).exists():
+        if filename and (has_new_file or not (supplier_dir / filename).exists()):
             synced_count += 1
 
-        # 尝试拆分品名与单价。如果像“黄花，8元/株”用了逗号，我们也完美兼容
-        display_name = item_name_price
+        # 拆分品名与单价
+        display_name = str(item_name_price)
         display_price = "见图/电询"
         
-        for separator in ['_', '，', ',']:
-            if separator in item_name_price:
-                parts = item_name_price.split(separator)
+        for separator in ['_', '，', ',', ' ']:
+            if separator in str(item_name_price):
+                parts = str(item_name_price).split(separator)
                 display_name = parts[0].strip()
                 display_price = parts[1].strip()
                 break
@@ -193,7 +218,7 @@ def sync_from_feishu():
     
     import time
     LAST_RUN_FILE.write_text(time.strftime("%Y-%m-%d %H:%M:%S"))
-    print(f"🎉 同步完成！成功将有效的数据写入本地数据库。")
+    print(f"🎉 同步完成！当前本地数据库共有 {len(data_json_list)} 条有效数据。")
 
 if __name__ == "__main__":
     sync_from_feishu()
