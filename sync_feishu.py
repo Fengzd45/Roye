@@ -92,10 +92,6 @@ def download_file(url, save_path, token):
 
 # ✨ 核心：智能模糊提取器
 def extract_field_smartly(fields_dict, keywords):
-    """
-    在飞书返回的字段字典中，只要键名(Key)包含 keywords 列表中的任何一个词（忽略大小写和空格），
-    就将其值返回，实现对字段名变动的完美自适应！
-    """
     for key, value in fields_dict.items():
         key_lower = str(key).lower().replace(" ", "")
         for kw in keywords:
@@ -120,7 +116,7 @@ def sync_from_feishu():
             print("🔬 [诊断信息] 飞书返回的实际字段名列表如下：")
             for k, v in fields.items():
                 print(f"   - 字段名: '{k}', 对应值类型: {type(v).__name__}")
-            break # 只打印一条即可
+            break
 
     synced_count = 0
     data_json_list = []
@@ -133,20 +129,19 @@ def sync_from_feishu():
         # 🌟 超强自适应匹配，模糊识别列名
         company = extract_field_smartly(fields, ["company", "公司", "供货商", "单位"])
         contact = extract_field_smartly(fields, ["contact", "phone", "tel", "联系方式", "电话"])
-        item_name_price = extract_field_smartly(fields, ["item", "price", "商品", "单价", "报价", "名称"])
+        raw_item_info = extract_field_smartly(fields, ["item", "price", "商品", "单价", "报价", "名称"])
         valid_date = extract_field_smartly(fields, ["valid", "date", "期", "时间", "天"])
         image_field = extract_field_smartly(fields, ["image", "product", "photo", "pic", "图", "照"])
 
         # 校验关键字段
-        if not company or not item_name_price:
+        if not company or not raw_item_info:
             print(f"⚠️ 跳过不完整记录 - ID: {record.get('record_id')} (由于未能匹配到公司名或商品信息)")
             continue
 
         safe_company = clean_filename(company)
         safe_contact = clean_filename(contact) if contact else "未留联系方式"
-        safe_item_name_price = clean_filename(item_name_price)
         
-        # 处理可能包含多种格式的有效期（如时间戳）
+        # 处理有效日期
         if isinstance(valid_date, int):
             import time
             safe_valid_date = time.strftime("%Y-%m-%d", time.localtime(valid_date/1000))
@@ -156,50 +151,77 @@ def sync_from_feishu():
         supplier_dir = DATA_DIR / f"{safe_company}_{safe_contact}"
         supplier_dir.mkdir(exist_ok=True)
         
-        image_local_path = ""
-        has_new_file = False
-        filename = ""
-
-        if image_field and isinstance(image_field, list) and len(image_field) > 0:
-            media = image_field[0]
-            orig_name = media.get("name", "image.jpg")
-            ext = os.path.splitext(orig_name)[1] or ".jpg"
-            
-            filename = f"{safe_item_name_price}_{safe_valid_date}{ext}"
-            download_url = media.get("url")
-            
-            if download_url:
-                save_path = supplier_dir / filename
-                if save_path.exists() and not FULL_SYNC:
-                    image_local_path = str(save_path)
-                else:
-                    if download_file(download_url, save_path, token):
-                        print(f"✅ 成功下载商品图: {supplier_dir.name}/{filename}")
-                        image_local_path = str(save_path)
-                        has_new_file = True
-
-        if filename and (has_new_file or not (supplier_dir / filename).exists()):
-            synced_count += 1
-
-        # 拆分品名与单价
-        display_name = str(item_name_price)
-        display_price = "见图/电询"
+        # 🌟【改造核心 1】：解析包含多商品的文本列
+        # 兼容换行符、分号、或包含多个商品的文本描述，支持按换行、分号或大空格切分
+        raw_item_str = str(raw_item_info).strip()
+        # 统一将常见的多项分隔符替换成换行符，以便切分
+        raw_item_str = raw_item_str.replace(";", "\n").replace("；", "\n")
+        items_list = [line.strip() for line in raw_item_str.split("\n") if line.strip()]
         
-        for separator in ['_', '，', ',', ' ']:
-            if separator in str(item_name_price):
-                parts = str(item_name_price).split(separator)
-                display_name = parts[0].strip()
-                display_price = parts[1].strip()
-                break
+        # 🌟【改造核心 2】：获取所有的图片附件列表
+        images_list = []
+        if image_field and isinstance(image_field, list):
+            images_list = image_field
 
-        data_json_list.append({
-            "company": str(company).strip(),
-            "contact": str(contact).strip() if contact else "无",
-            "item_name": display_name,
-            "price": display_price,
-            "valid_date": safe_valid_date,
-            "image_path": image_local_path.replace("\\", "/") if image_local_path else ""
-        })
+        # 确定匹配的总轮数（以商品信息和图片数量的较多者为准，防止漏掉数据）
+        max_len = max(len(items_list), len(images_list))
+        print(f"📦 发现供货商 [{safe_company}] 的多品种数据：解析到 {len(items_list)} 项商品文本，含有 {len(images_list)} 张产品图。开始顺次对齐...")
+
+        for i in range(max_len):
+            # --- 1. 获取当前顺次项的商品文本并拆分品名与价格 ---
+            if i < len(items_list):
+                current_item_str = items_list[i]
+                display_name = current_item_str
+                display_price = "见图/电询"
+                
+                # 兼容不同切分符，尝试分离“品名”与“单价”
+                for separator in ['_', '，', ',', ' ']:
+                    if separator in current_item_str:
+                        parts = current_item_str.split(separator)
+                        # 过滤掉由于连续空格产生的空字符串
+                        parts = [p.strip() for p in parts if p.strip()]
+                        if len(parts) >= 2:
+                            display_name = parts[0]
+                            display_price = parts[1]
+                            break
+            else:
+                display_name = f"未命名品种_{i+1}"
+                display_price = "见图/电询"
+            
+            safe_item_name_price = clean_filename(f"{display_name}_{display_price}")
+
+            # --- 2. 获取当前顺次项的图片并执行下载 ---
+            image_local_path = ""
+            if i < len(images_list):
+                media = images_list[i]
+                orig_name = media.get("name", "image.jpg")
+                ext = os.path.splitext(orig_name)[1] or ".jpg"
+                
+                # 文件名中加入顺次序号 i 以防重名覆盖
+                filename = f"{safe_item_name_price}_{safe_valid_date}_{i+1}{ext}"
+                download_url = media.get("url")
+                
+                if download_url:
+                    save_path = supplier_dir / filename
+                    if save_path.exists() and not FULL_SYNC:
+                        image_local_path = str(save_path)
+                    else:
+                        if download_file(download_url, save_path, token):
+                            print(f"   ✅ [顺次匹配 {i+1}] 成功下载对应商品图: {supplier_dir.name}/{filename}")
+                            image_local_path = str(save_path)
+                            synced_count += 1
+            else:
+                print(f"   ⚠️ [顺次匹配 {i+1}] 警告：未找到对应的顺次产品图图片")
+
+            # --- 3. 顺次生成汇集审视端所需的独立条目 ---
+            data_json_list.append({
+                "company": str(company).strip(),
+                "contact": str(contact).strip() if contact else "无",
+                "item_name": display_name,
+                "price": display_price,
+                "valid_date": safe_valid_date,
+                "image_path": image_local_path.replace("\\", "/") if image_local_path else ""
+            })
 
     # 生成传统的 manifest.json
     manifest = {}
@@ -218,7 +240,7 @@ def sync_from_feishu():
     
     import time
     LAST_RUN_FILE.write_text(time.strftime("%Y-%m-%d %H:%M:%S"))
-    print(f"🎉 同步完成！当前本地数据库共有 {len(data_json_list)} 条有效数据。")
+    print(f"🎉 同步完成！当前本地数据库一共产出了 {len(data_json_list)} 条打散对齐后的独立有效数据。")
 
 if __name__ == "__main__":
     sync_from_feishu()
